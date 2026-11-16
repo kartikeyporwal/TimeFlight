@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Start ComfyUI (:8188) and comfy-api-proxy (:8189) in the background, wait until ready.
-# Uses the same TF_WORK / TF_COMFY as colab/setup_comfy.sh (default /content, /content/ComfyUI).
+# Uses the same TF_WORK / TF_COMFY as colab/setup_comfy.sh (default /content, /content/ComfyUI); COMFY_ARGS = extra flags.
 set -euo pipefail
 
 WORK=${TF_WORK:-/content}
@@ -8,7 +8,8 @@ COMFY=${TF_COMFY:-$WORK/ComfyUI}
 
 cd "$COMFY"
 if ! curl -sf http://127.0.0.1:8188/object_info > /dev/null; then
-  nohup python main.py --listen 127.0.0.1 --port 8188 > "$WORK/comfy.log" 2>&1 &
+  # COMFY_ARGS: extra ComfyUI flags, e.g. "--lowvram" on 24 GB GPUs (weights streamed from system RAM)
+  nohup python main.py --listen 127.0.0.1 --port 8188 ${COMFY_ARGS:-} > "$WORK/comfy.log" 2>&1 &
   for i in $(seq 1 120); do
     curl -sf http://127.0.0.1:8188/object_info > /dev/null && break
     sleep 3

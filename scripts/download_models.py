@@ -3,7 +3,8 @@
   python scripts/download_models.py --comfy-dir /content/ComfyUI --precision auto
 
 Needs HF_TOKEN with access granted to the gated Lightricks repos ("Agree and access" once in a
-browser). `--precision auto` picks bf16 on >= 70 GB GPUs and Comfy int8 otherwise. Writes the
+browser). `--precision auto` picks bf16 on >= 70 GB GPUs, nvfp4 (4-bit transformer) on Blackwell GPUs under 40 GB, and
+Comfy int8 otherwise; the text encoder is int8 whenever the transformer is not bf16. Writes the
 chosen filenames to <comfy-dir>/timeflight_models.json; app/run_m0.py reads it.
 All files are logged in assets.jsonl (see docs/decisions.md for license notes).
 """
@@ -47,10 +48,44 @@ def pick_int8(files: list[str], folder: str, must: list[str]) -> str:
     return hits[0]
 
 
+def gpu_compute_capability() -> float:
+    out = subprocess.run(["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],
+                         capture_output=True, text=True, check=True).stdout
+    return float(out.splitlines()[0])
+
+
+def pick_quant(files: list[str], folder: str, must: list[str], tag: str) -> str:
+    """Quantised filenames are not documented; find them by pattern (e.g. tag 'nvfp4') and fail loudly."""
+    hits = [f for f in files if f.startswith(folder + "/") and tag in f.lower() and all(m in f.lower() for m in must)]
+    if len(hits) != 1:
+        raise SystemExit(f"Expected one {tag} file in {folder} matching {must}, found {hits}")
+    return hits[0]
+
+
+def resolve_precision(precision: str) -> str:
+    if precision != "auto":
+        return precision
+    mem = gpu_memory_gb()
+    if mem >= 70:
+        return "bf16"
+    if mem < 40 and gpu_compute_capability() >= 10.0:  # FP4 tensor cores: Blackwell (sm_100 / sm_120)
+        return "nvfp4"
+    return "int8"
+
+
+def choose(files: list[str], precision: str) -> dict[str, str]:
+    """Model files for a resolved precision (bf16 | int8 | nvfp4), without the common VAEs."""
+    if precision == "bf16":
+        return dict(BF16)
+    transformer = (pick_quant(files, "diffusion_models", ["distilled"], "nvfp4") if precision == "nvfp4"
+                   else pick_int8(files, "diffusion_models", ["distilled"]))
+    return {"transformer": transformer, "text_encoder": pick_int8(files, "text_encoders", ["gemma"])}
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--comfy-dir", type=Path, required=True)
-    p.add_argument("--precision", choices=["auto", "bf16", "int8"], default="auto")
+    p.add_argument("--precision", choices=["auto", "bf16", "int8", "nvfp4"], default="auto")
     p.add_argument("--with-upscaler", action="store_true", help="stage 2 (not needed for M0)")
     p.add_argument("--list", action="store_true", help="only list repo files")
     args = p.parse_args()
@@ -64,16 +99,8 @@ def main() -> None:
         print("\n".join(files))
         return
 
-    precision = args.precision
-    if precision == "auto":
-        precision = "bf16" if gpu_memory_gb() >= 70 else "int8"
-    if precision == "bf16":
-        chosen = dict(BF16)
-    else:
-        chosen = {
-            "transformer": pick_int8(files, "diffusion_models", ["distilled"]),
-            "text_encoder": pick_int8(files, "text_encoders", ["gemma"]),
-        }
+    precision = resolve_precision(args.precision)
+    chosen = choose(files, precision)
     chosen.update(COMMON)
     if args.with_upscaler:
         chosen["upscaler"] = UPSCALER

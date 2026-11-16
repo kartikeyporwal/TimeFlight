@@ -94,6 +94,28 @@ def plan(step: str, prompts: list[str], strengths: list[float], modes: list[str]
     ]
 
 
+# Filenames chosen by scripts/download_models.py (bf16 / int8 / nvfp4). The API workflows name the bf16 files; on smaller
+# GPUs only the quantised files exist, so every loader node is pointed at the chosen file (keys = node titles).
+MODELS_JSON = Path(os.environ.get("TF_COMFY", "/content/ComfyUI")) / "timeflight_models.json"
+MODEL_TITLES = {"upscaler": "latent_upscaler"}  # timeflight_models.json key -> node title where they differ
+
+
+def apply_models(wf, workflow: dict, ids: dict[str, str]) -> dict[str, str]:
+    """Set each loader's model file from MODELS_JSON (if present); returns {title: file} that was applied."""
+    if not MODELS_JSON.exists():
+        return {}
+    applied = {}
+    for key, name in json.loads(MODELS_JSON.read_text()).items():
+        title = MODEL_TITLES.get(key, key)
+        if title not in ids or not str(name).endswith(".safetensors"):
+            continue
+        for inp, val in workflow[ids[title]]["inputs"].items():
+            if isinstance(val, str) and val.endswith(".safetensors"):
+                wf.set_input(ids[title], inp, name)
+                applied[title] = name
+    return applied
+
+
 def node_ids_by_title(workflow: dict) -> dict[str, str]:
     ids = {}
     for node_id, node in workflow.items():
@@ -108,8 +130,12 @@ def run_variant(client, v: dict, renders: Path, results: Path, texts: dict,
                 comfy_input_dir: Path | None, seed: int) -> dict:
     init = v.get("init_sigma") is not None
     workflow = WORKFLOW_INIT if init else WORKFLOW
-    ids = node_ids_by_title(json.loads(workflow.read_text()))
+    raw = json.loads(workflow.read_text())
+    ids = node_ids_by_title(raw)
     wf = client.workflows.from_file(str(workflow))
+    applied = apply_models(wf, raw, ids)
+    if applied:
+        print(f"models: {applied}", flush=True)
 
     def set_file(title: str, src: Path) -> None:
         if not src.exists():
